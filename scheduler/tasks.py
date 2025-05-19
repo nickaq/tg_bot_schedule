@@ -35,11 +35,11 @@ class AttendanceScheduler:
     
     def start(self):
         """Start the scheduler"""
-        # Add job to check attendance every CHECK_INTERVAL_MINUTES minutes
+        # Check all attendance links every 5 minutes
         self.scheduler.add_job(
             self._run_check_attendance, 
             'interval', 
-            minutes=CHECK_INTERVAL_MINUTES,
+            minutes=5,
             next_run_time=datetime.datetime.now(pytz.UTC) + datetime.timedelta(seconds=10)  # Start first check after 10 seconds
         )
         
@@ -48,7 +48,7 @@ class AttendanceScheduler:
         # Load the schedule data
         self.schedule_parser.load_schedule()
         
-        logger.info(f"Scheduler started. Checking attendance every {CHECK_INTERVAL_MINUTES} minutes")
+        logger.info(f"Scheduler started. Checking all attendance links every 5 minutes")
         
     def reload_schedule(self):
         """Reload the schedule from CSV file"""
@@ -67,14 +67,14 @@ class AttendanceScheduler:
     def _run_check_attendance(self):
         """Non-async wrapper for async attendance check to be used with scheduler"""
         try:
-            # Создаем новый цикл событий для текущего потока
+            # Create a new event loop for current thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-            # Запускаем асинхронную проверку напрямую в этом потоке
+            # Run async check in this thread
             loop.run_until_complete(self._run_check_attendance_async())
             
-            # Закрываем цикл событий
+            # Close event loop
             loop.close()
         except Exception as e:
             logger.error(f"Error scheduling attendance check: {e}")
@@ -94,7 +94,7 @@ class AttendanceScheduler:
             return self.schedule_parser.is_class_time(current_time)
         except Exception as e:
             logger.error(f"Error checking class time: {e}")
-            return True, None  # В случае ошибки вернуть True (предполагаем, что сейчас занятие)
+            return True, None  # In case of error, return True (assume it's class time)
         
     def stop(self):
         """Stop the scheduler"""
@@ -103,48 +103,30 @@ class AttendanceScheduler:
             
     async def _run_check_attendance_async(self):
         """Run the attendance check for all users"""
-        logger.info("Starting scheduled attendance check")
-        current_time = datetime.datetime.now(pytz.timezone('Europe/Kiev'))
+        logger.info("Starting attendance check for all users")
         
-        # Check if it's class time based on the schedule
-        is_class_time, class_info = self.schedule_parser.is_class_time(current_time)
-        
-        if not is_class_time:
-            logger.info("Not class time, skipping attendance check")
-            return
-        
-        if class_info:
-            class_name = class_info.get('subject', 'Unknown')
-            start_time = class_info['start_time'].strftime("%H:%M")
-            end_time = class_info['end_time'].strftime("%H:%M")
-            logger.info(f"Current class: {class_name} ({start_time}-{end_time})")
-        
-        session = get_db_session()
         try:
-            # Get all active users with their lessons
-            users = DatabaseManager.get_all_users(session)
-            
-            for user in users:
-                try:
-                    # Skip if user has no credentials or is inactive
-                    if not user.moodle_username or not user.encrypted_password or not user.is_active:
-                        continue
-                        
-                    # Skip if user has no active lessons
-                    active_lessons = [lesson for lesson in user.lessons if lesson.is_active]
-                    if not active_lessons:
-                        continue
+            session = get_db_session()
+            try:
+                # Get all active users with their lessons
+                user_lessons = DatabaseManager.get_all_active_users_and_lessons(session)
+                # Extract users
+                users = [user for user, _ in user_lessons] if user_lessons else []
+                
+                if not users:
+                    logger.info("No users found for attendance check")
+                    return
+                
+                # Check attendance for all users
+                await self.check_all_attendances()
                     
-                    # Since we've already checked if it's class time, just process the lessons
-                    await self.check_user_attendances(user, active_lessons)
-                    
-                except Exception as e:
-                    logger.error(f"Error checking attendance for user {user.telegram_id}: {str(e)}")
-        
+            except Exception as e:
+                logger.error(f"Error in attendance check: {str(e)}")
+            finally:
+                session.close()
+                
         except Exception as e:
             logger.error(f"Error in attendance check: {str(e)}")
-        finally:
-            session.close()
     
     async def check_all_attendances(self):
         """Check attendance for all active users and lessons"""
@@ -153,21 +135,21 @@ class AttendanceScheduler:
         session = get_db_session()
         try:
             # Get all active users with their lessons
-            users = DatabaseManager.get_all_users(session)
+            user_lessons = DatabaseManager.get_all_active_users_and_lessons(session)
+            # Extract users
+            users = [user for user, _ in user_lessons] if user_lessons else []
             
             for user in users:
                 try:
                     # Skip if user has no credentials or is inactive
-                    if not user.moodle_username or not user.encrypted_password or not user.is_active:
+                    if not user.moodle_username or not user.encrypted_password or not user.active:
                         continue
                         
-                    # Skip if user has no active lessons
-                    active_lessons = [lesson for lesson in user.lessons if lesson.is_active]
-                    if not active_lessons:
-                        continue
+                    # Get all lessons for this user, regardless of status
+                    all_lessons = DatabaseManager.get_user_lessons(session, user.id)
                     
-                    # Process user's lessons
-                    await self.check_user_attendances(user, active_lessons)
+                    # Check attendance for all lessons
+                    await self.check_user_attendances(user, all_lessons)
                     
                 except Exception as e:
                     logger.error(f"Error checking attendance for user {user.telegram_id}: {str(e)}")
@@ -182,115 +164,30 @@ class AttendanceScheduler:
         logger.info(f"Checking attendance for user {user.telegram_id}, {len(lessons)} lessons")
         
         try:
-            if not user.moodle_login or not user.moodle_password_encrypted:
-                logger.warning(f"Missing credentials for user {user.telegram_id}")
-                return
-                
-            # Initialize MoodleClient for this user
-            client = MoodleClient(user.moodle_login, user.moodle_password_encrypted, is_encrypted=True)
-            
-            # Check if credentials are valid
-            if not client.validate_credentials():
-                logger.warning(f"Invalid Moodle credentials for user {user.telegram_id}")
+            # Skip processing if no lessons found
+            if not lessons:
+                logger.info(f"No lessons found for user {user.telegram_id}")
                 return
             
-            logger.info(f"Checking {len(lessons)} lessons for user {user.telegram_id}")
+            # Get Moodle client for this user
+            client = MoodleClient(user.moodle_username, user.moodle_password)
             
-            # Check if we're currently in class time
-            is_class_time, current_class = self.check_is_class_time()
-            
-            # Current time in Kiev timezone
-            current_time = datetime.now(pytz.timezone('Europe/Kiev'))
-            matched_lessons = []
-            
-            if is_class_time and current_class:
-                class_name = current_class.get('subject', 'Заняття')
-                logger.info(f"Current class time detected: {class_name}")
+            # Process all lessons without filtering by current class or subject
+            for lesson in lessons:
+                # Skip inactive lessons
+                if not lesson.active:
+                    continue
                 
-                # Find lessons that match the current class
-                for lesson in lessons:
-                    # Skip inactive lessons
-                    if not lesson.is_active:
-                        continue
-                    
-                    # Check if this lesson matches the current class
-                    is_matching = False
-                    
-                    # If the lesson has a name, check if it contains part of the current class name or vice versa
-                    if lesson.name and class_name:
-                        # Clean the names for better matching
-                        lesson_name_clean = lesson.name.lower().replace(' ', '')
-                        class_name_clean = class_name.lower().replace(' ', '')
-                        
-                        # Check for partial matches in both directions
-                        if (lesson_name_clean in class_name_clean) or (class_name_clean in lesson_name_clean):
-                            is_matching = True
-                            logger.info(f"Lesson '{lesson.name}' matches current class '{class_name}'")
-                    
-                    # If no direct name match but we have a URL with the subject code, try to match that
-                    if not is_matching and lesson.url:
-                        # Extract potential subject codes from the URL
-                        url_parts = lesson.url.split('/')
-                        for part in url_parts:
-                            # If any part of the URL matches a substring of the class name
-                            if len(part) > 3 and part.lower() in class_name.lower():
-                                is_matching = True
-                                logger.info(f"Lesson URL '{part}' matches current class '{class_name}'")
-                                break
-                    
-                    # If we can't match, we still add it to the list as we might want to check it anyway
-                    # But mark it for special handling
-                    matched_lessons.append((lesson, is_matching))
+                # Check attendance for this lesson
+                await self.check_lesson_attendance(user, lesson, client)
                 
-                # If we have at least one matching lesson, only mark those
-                has_matching = any(is_matching for _, is_matching in matched_lessons)
-                
-                if matched_lessons:
-                    for lesson, is_matching in matched_lessons:
-                        try:
-                            # Skip non-matching lessons if we have at least one match
-                            if has_matching and not is_matching:
-                                logger.info(f"Skipping lesson {lesson.id} '{lesson.name}' as it doesn't match current class '{class_name}'")
-                                continue
-                            
-                            # Check this lesson
-                            await self.check_lesson_attendance(user, lesson, client)
-                            
-                            # Send specific notification for matched lessons
-                            if is_matching and self.bot:
-                                try:
-                                    lesson_name = lesson.name or f"Заняття #{lesson.id}"
-                                    await self.bot.send_message(
-                                        chat_id=user.telegram_id,
-                                        text=f"✅ Відмічаюсь на занятті що збігається з розкладом: {class_name} ({lesson_name})"
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Error sending match notification: {e}")
-                                
-                        except Exception as e:
-                            logger.error(f"Error checking lesson {lesson.id} for user {user.telegram_id}: {e}")
-                else:
-                    logger.info(f"No active lessons found for user {user.telegram_id} to match with class '{class_name}'")
-            else:
-                logger.info(f"No current class time detected, skipping attendance check for user {user.telegram_id}")
-                # Optionally notify user that there's no class at the moment if debug needed
-                # This is commented out to avoid spamming users when there are no classes
-                # if self.bot:
-                #     try:
-                #         await self.bot.send_message(
-                #             chat_id=user.telegram_id,
-                #             text="ℹ️ Зараз немає занять, відмічатися не потрібно."
-                #         )
-                #     except Exception as e:
-                #         logger.error(f"Error sending notification to user {user.telegram_id}: {e}")
-            
-            # Add a small delay between requests to avoid rate limiting
-            await asyncio.sleep(1)
+                # Add a small delay between requests to avoid rate limiting
+                await asyncio.sleep(1)
                 
         except Exception as e:
             logger.error(f"Error processing lessons for user {user.telegram_id}: {e}")
                 
-    # Вспомогательный метод для отправки уведомлений
+    # Helper method for sending notifications
     async def send_notification(self, chat_id, text):
         if self.bot:
             await self.bot.send_message(
