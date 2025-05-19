@@ -58,6 +58,8 @@ async def start_command(message: Message):
                 [KeyboardButton(text="🔑 Налаштувати облікові дані"), KeyboardButton(text="➕ Додати заняття")],
                 [KeyboardButton(text="📋 Список занять"), KeyboardButton(text="❌ Видалити заняття")],
                 [KeyboardButton(text="⚙️ Увімкнути/вимкнути заняття"), KeyboardButton(text="📊 Статус")],
+                [KeyboardButton(text="📆 Розклад на сьогодні"), KeyboardButton(text="📅 Розклад на тиждень")],
+                [KeyboardButton(text="🔍 Поточне заняття"), KeyboardButton(text="📋 Повний розклад")],
             ],
             resize_keyboard=True,
             is_persistent=True
@@ -412,11 +414,143 @@ async def cancel_command(message: Message, state: FSMContext):
 
 
 async def schedule_command(message: Message):
-    """Handler for /schedule command - shows today's and weekly class schedule from CSV file"""
+    """Handler for /schedule command - shows menu with schedule options"""
+    try:
+        # Create an inline keyboard with schedule options
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📆 Розклад на сьогодні", callback_data="schedule:today")],
+            [InlineKeyboardButton(text="📅 Розклад на тиждень", callback_data="schedule:week")],
+            [InlineKeyboardButton(text="🔍 Поточне заняття", callback_data="schedule:current")],
+            [InlineKeyboardButton(text="📋 Повний розклад", callback_data="schedule:full")]
+        ])
+        
+        # Send menu message
+        await message.answer(
+            "📚 Оберіть тип розкладу занять:", 
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in schedule command: {e}", exc_info=True)
+        await message.answer("❌ Помилка при створенні меню розкладу. Спробуйте пізніше.")
+
+
+async def handle_schedule_callback(callback: CallbackQuery):
+    """Handler for schedule callback queries"""
+    try:
+        # Remove the 'schedule:' prefix from the callback data
+        schedule_type = callback.data.split(':')[1]
+        
+        # Initialize schedule parser
+        schedule_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                   'TimeTable.csv')
+        parser = SimpleScheduleParser(schedule_path)
+        
+        if not parser.load_schedule():
+            await callback.answer("Не вдалося завантажити розклад занять")
+            await callback.message.answer("❌ Не вдалося завантажити розклад занять. Спробуйте пізніше.")
+            return
+        
+        # Handle different schedule types
+        response = ""
+        
+        if schedule_type == "today":
+            # Today's schedule
+            today_classes = parser.get_upcoming_classes(days=1)
+            if today_classes:
+                response = parser.format_schedule(today_classes)
+            else:
+                response = "📆 Сьогодні занять немає"
+                
+        elif schedule_type == "week":
+            # Weekly schedule
+            response = parser.get_weekly_schedule()
+            
+        elif schedule_type == "current":
+            # Current class information
+            is_class_time, current_class = parser.is_class_time()
+            
+            if is_class_time and current_class:
+                subject = current_class.get('subject', 'Заняття')
+                start_time = current_class['start_time'].strftime("%H:%M")
+                end_time = current_class['end_time'].strftime("%H:%M")
+                response = f"✨ <b>Поточне заняття:</b>\n\n📚 Предмет: {subject}\n🕒 Час: {start_time} - {end_time}"
+            else:
+                response = "✨ <b>Зараз немає занять</b>"
+                
+        elif schedule_type == "full":
+            # Full schedule (all classes)
+            all_classes = parser.schedule
+            response = parser.format_schedule(all_classes)
+            
+        # Answer the callback to stop the loading animation
+        await callback.answer()
+        
+        # Send the schedule
+        await callback.message.answer(response, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Error in handle_schedule_callback: {e}", exc_info=True)
+        await callback.answer("Помилка при отриманні розкладу")
+        await callback.message.answer("❌ Помилка при отриманні розкладу. Спробуйте пізніше.")
+
+
+async def today_schedule_command(message: Message):
+    """Handler for "Розклад на сьогодні" button"""
     try:
         # Initialize schedule parser
         schedule_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                                    'TimeTable.csv')
+                                   'TimeTable.csv')
+        parser = SimpleScheduleParser(schedule_path)
+        
+        if not parser.load_schedule():
+            await message.answer("❌ Не вдалося завантажити розклад занять. Спробуйте пізніше.")
+            return
+            
+        # Get today's classes
+        today_classes = parser.get_upcoming_classes(days=1)
+        if today_classes:
+            response = parser.format_schedule(today_classes)
+        else:
+            response = "📆 Сьогодні занять немає"
+        
+        # Send the schedule
+        await message.answer(response, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Error in today_schedule_command: {e}", exc_info=True)
+        await message.answer("❌ Помилка при отриманні розкладу. Спробуйте пізніше.")
+
+
+async def week_schedule_command(message: Message):
+    """Handler for "Розклад на тиждень" button"""
+    try:
+        # Initialize schedule parser
+        schedule_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                   'TimeTable.csv')
+        parser = SimpleScheduleParser(schedule_path)
+        
+        if not parser.load_schedule():
+            await message.answer("❌ Не вдалося завантажити розклад занять. Спробуйте пізніше.")
+            return
+            
+        # Get weekly schedule
+        response = parser.get_weekly_schedule()
+        
+        # Send the schedule
+        await message.answer(response, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Error in week_schedule_command: {e}", exc_info=True)
+        await message.answer("❌ Помилка при отриманні розкладу. Спробуйте пізніше.")
+
+
+async def current_class_command(message: Message):
+    """Handler for "Поточне заняття" button"""
+    try:
+        # Initialize schedule parser
+        schedule_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                   'TimeTable.csv')
         parser = SimpleScheduleParser(schedule_path)
         
         if not parser.load_schedule():
@@ -426,28 +560,45 @@ async def schedule_command(message: Message):
         # Check if there's a class in session now
         is_class_time, current_class = parser.is_class_time()
         
-        # Build the response message
-        response_parts = []
-        
-        # 1. Current class status
         if is_class_time and current_class:
             subject = current_class.get('subject', 'Заняття')
             start_time = current_class['start_time'].strftime("%H:%M")
             end_time = current_class['end_time'].strftime("%H:%M")
-            response_parts.append(f"✨ <b>Поточне заняття:</b> {subject} ({start_time} - {end_time})\n")
+            response = f"✨ <b>Поточне заняття:</b>\n\n📚 Предмет: {subject}\n🕒 Час: {start_time} - {end_time}"
         else:
-            response_parts.append("✨ <b>Зараз немає занять</b>\n")
+            response = "✨ <b>Зараз немає занять</b>"
         
-        # Get weekly schedule in a compact format organized by weekday
-        weekly_schedule = parser.get_weekly_schedule()
-        response_parts.append(weekly_schedule)
-        
-        # Send the complete message
-        await message.answer("\n".join(response_parts), parse_mode='HTML')
+        # Send the current class info
+        await message.answer(response, parse_mode='HTML')
         
     except Exception as e:
-        logger.error(f"Error in schedule command: {e}", exc_info=True)
+        logger.error(f"Error in current_class_command: {e}", exc_info=True)
+        await message.answer("❌ Помилка при отриманні інформації про заняття. Спробуйте пізніше.")
+
+
+async def full_schedule_command(message: Message):
+    """Handler for "Повний розклад" button"""
+    try:
+        # Initialize schedule parser
+        schedule_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                   'TimeTable.csv')
+        parser = SimpleScheduleParser(schedule_path)
+        
+        if not parser.load_schedule():
+            await message.answer("❌ Не вдалося завантажити розклад занять. Спробуйте пізніше.")
+            return
+            
+        # Get full schedule
+        all_classes = parser.schedule
+        response = parser.format_schedule(all_classes)
+        
+        # Send the full schedule
+        await message.answer(response, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Error in full_schedule_command: {e}", exc_info=True)
         await message.answer("❌ Помилка при отриманні розкладу. Спробуйте пізніше.")
+
 
 async def status_command(message: Message):
     """Handler for /status command - shows login status and active lessons"""
@@ -518,7 +669,13 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(status_command, Command(commands=["status"]))
     dp.message.register(status_command, F.text == "📊 Статус")
     dp.message.register(schedule_command, Command(commands=["schedule"]))
-    dp.message.register(schedule_command, F.text == "📅 Розклад занять")
+    
+    # Register schedule button handlers
+    dp.message.register(today_schedule_command, F.text == "📆 Розклад на сьогодні")
+    dp.message.register(week_schedule_command, F.text == "📅 Розклад на тиждень")
+    dp.message.register(current_class_command, F.text == "🔍 Поточне заняття")
+    dp.message.register(full_schedule_command, F.text == "📋 Повний розклад")
+    
     dp.message.register(cancel_command, Command(commands=["cancel"]))
     dp.message.register(cancel_command, F.text == "Скасувати")
     
@@ -531,5 +688,6 @@ def register_handlers(dp: Dispatcher):
     # Callback query handlers
     dp.callback_query.register(remove_lesson_callback, F.data.startswith("remove_"))
     dp.callback_query.register(toggle_lesson_callback, F.data.startswith("toggle_"))
+    dp.callback_query.register(handle_schedule_callback, F.data.startswith("schedule:"))
     
     return dp
