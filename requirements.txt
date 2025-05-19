@@ -1,0 +1,9 @@
+aiogram==3.20.0
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+cryptography==42.0.5
+apscheduler==3.10.4
+python-dotenv==1.0.1
+SQLAlchemy>=2.0.28
+pydantic>=2.6.3
