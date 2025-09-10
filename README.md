@@ -23,7 +23,7 @@ Telegram bot for automatically marking attendance in NURE's Moodle system (https
 - `/toggle_lesson` - Enable/disable automatic attendance for specific lessons
 - `/cancel` - Cancel any ongoing operation
 
-## Setup
+## Setup the project
 
 1. Clone this repository
 2. Install dependencies:
