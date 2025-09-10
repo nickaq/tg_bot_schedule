@@ -6,4 +6,4 @@ cryptography==42.0.5
 apscheduler==3.10.4
 python-dotenv==1.0.1
 SQLAlchemy>=2.0.28
-pydantic>=2.6.3
+pytz
