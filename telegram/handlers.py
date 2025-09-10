@@ -13,6 +13,7 @@ from db.models import get_db_session
 from db.database import DatabaseManager
 from config import MOODLE_BASE_URL
 from simple_schedule_parser import SimpleScheduleParser
+import logging
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +30,11 @@ class CredentialsForm(StatesGroup):
     password = State()
 
 
+class GroupForm(StatesGroup):
+    """States for group selection"""
+    group = State()
+
+
 class LessonForm(StatesGroup):
     """States for adding a lesson"""
     url = State()
@@ -39,7 +45,7 @@ class LessonForm(StatesGroup):
 storage = MemoryStorage()
 
 
-async def start_command(message: Message):
+async def start_command(message: Message, state: FSMContext):
     """Handler for /start command"""
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
@@ -49,49 +55,147 @@ async def start_command(message: Message):
         # Check if user exists, create if not
         user = DatabaseManager.get_user_by_telegram_id(session, user_id)
         if not user:
-            DatabaseManager.create_user(session, user_id)
+            user = DatabaseManager.create_user(session, user_id)
             logger.info(f"Created new user: {user_id}")
         
         # Create keyboard with main commands
-        keyboard = ReplyKeyboardMarkup(
+        main_keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔑 Налаштувати облікові дані"), KeyboardButton(text="➕ Додати заняття")],
                 [KeyboardButton(text="📋 Список занять"), KeyboardButton(text="❌ Видалити заняття")],
                 [KeyboardButton(text="⚙️ Увімкнути/вимкнути заняття"), KeyboardButton(text="📊 Статус")],
-                [KeyboardButton(text="📆 Розклад на сьогодні"), KeyboardButton(text="📅 Розклад на тиждень")],
+                [KeyboardButton(text="📆 Сьогодні"), KeyboardButton(text="📅 Тиждень")],
                 [KeyboardButton(text="🔍 Поточне заняття"), KeyboardButton(text="📋 Повний розклад")],
             ],
             resize_keyboard=True,
             is_persistent=True
         )
         
-        # Welcome message in Ukrainian
-        await message.answer(
-            f"👋 Вітаю, {username}!\n\n"
-            f"Я бот, який може автоматично відмічати вашу присутність на заняттях у системі dl.nure.ua.\n\n"
-            f"Щоб почати, налаштуйте свої облікові дані Moodle, натиснувши '🔑 Налаштувати облікові дані'.\n"
-            f"Потім додайте свої заняття через '➕ Додати заняття'.\n\n"
-            f"Доступні команди:\n"
-            f"🔑 Налаштувати облікові дані - Встановити логін та пароль для Moodle\n"
-            f"➕ Додати заняття - Додати заняття для відстеження відвідуваності\n"
-            f"📋 Список занять - Показати збережені заняття\n"
-            f"❌ Видалити заняття - Видалити збережене заняття\n"
-            f"⚙️ Увімкнути/вимкнути заняття - Увімкнути/вимкнути автоматичну відмітку для занять\n"
-            f"📊 Статус - Перевірити статус авторизації та активні предмети\n\n"
-            f"Я автоматично перевірятиму ваші заняття кожні кілька хвилин і відмічатиму присутність, коли це можливо.",
-            reply_markup=keyboard
-        )
+        # If user doesn't have credentials yet
+        if not user.moodle_username or not user.encrypted_password:
+            await message.answer(
+                f"👋 Вітаю, {username}!\n\n"
+                f"Я бот, який може автоматично відмічати вашу присутність на заняттях у системі dl.nure.ua.\n\n"
+                f"Щоб почати, налаштуйте свої облікові дані Moodle, натиснувши '🔑 Налаштувати облікові дані'.",
+                reply_markup=main_keyboard
+            )
+        # If user has credentials but no group selected
+        elif not user.group:
+            # Create group selection keyboard
+            group_keyboard = ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="ІТШІ")],
+                    [KeyboardButton(text="КНТ")],
+                    [KeyboardButton(text="ІТУ")],
+                ],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+            
+            await message.answer(
+                f"👋 Вітаю, {username}!\n\n"
+                f"Для правильної роботи бота, будь ласка, оберіть вашу групу:",
+                reply_markup=group_keyboard
+            )
+            
+            # Set state to wait for group selection
+            await state.set_state(GroupForm.group)
+        # User has both credentials and group
+        else:
+            await message.answer(
+                f"👋 Вітаю, {username}!\n\n"
+                f"Ваша група: {user.group}\n\n"
+                f"Доступні команди:\n"
+                f"🔑 Налаштувати облікові дані - Встановити логін та пароль для Moodle\n"
+                f"➕ Додати заняття - Додати заняття для відстеження відвідуваності\n"
+                f"📊 Статус - Перевірити статус авторизації та активні предмети\n\n"
+                f"Я автоматично перевірятиму ваші заняття кожні 30 хвилин і відмічатиму присутність, коли це можливо.",
+                reply_markup=main_keyboard
+            )
     finally:
         session.close()
 
 
 async def set_credentials_command(message: Message, state: FSMContext):
     """Handler for /set_credentials command"""
+    # Get user's current active status
+    session = get_db_session()
+    user_id = message.from_user.id
+    active_status = True  # Default to active
+    
+    try:
+        user = DatabaseManager.get_user_by_telegram_id(session, user_id)
+        if user:
+            active_status = user.active
+    finally:
+        session.close()
+    
+    # Create settings menu with options
+    status_text = "✅ Активний" if active_status else "❌ Неактивний"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Налаштувати логін/пароль", callback_data="settings:credentials")],
+        [InlineKeyboardButton(text="👥 Змінити групу", callback_data="settings:group")],
+        [InlineKeyboardButton(text=f"🔄 Перемкнути статус бота ({status_text})", callback_data="settings:toggle_active")]
+    ])
+    
     await message.answer(
-        "Будь ласка, введіть вашу електронну адресу Moodle (логін):\n\n"
-        "Це має бути електронна адреса, яку ви використовуєте для входу в dl.nure.ua"
+        "⚙️ Налаштування облікового запису:\n\n"
+        "Оберіть, що ви хочете налаштувати:",
+        reply_markup=keyboard
     )
-    await state.set_state(CredentialsForm.username)
+
+
+async def handle_settings_callback(callback: CallbackQuery, state: FSMContext):
+    """Handler for settings callback queries"""
+    await callback.answer()
+    
+    # Get the settings action
+    action = callback.data.split(':')[1]
+    user_id = callback.from_user.id
+    
+    if action == "credentials":
+        await callback.message.answer(
+            "Будь ласка, введіть вашу електронну адресу Moodle (логін):\n\n"
+            "Це має бути електронна адреса, яку ви використовуєте для входу в dl.nure.ua"
+        )
+        await state.set_state(CredentialsForm.username)
+    elif action == "group":
+        # Create group selection keyboard
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="ІТШІ")],
+                [KeyboardButton(text="КНТ")],
+                [KeyboardButton(text="ІТУ")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        
+        await callback.message.answer(
+            "👥 Будь ласка, оберіть вашу групу:",
+            reply_markup=keyboard
+        )
+        await state.set_state(GroupForm.group)
+    elif action == "toggle_active":
+        session = get_db_session()
+        try:
+            # Toggle user active status
+            success, new_status = DatabaseManager.toggle_user_active_status(session, user_id)
+            
+            if success:
+                status_text = "активний" if new_status else "неактивний"
+                await callback.message.edit_text(
+                    f"⚙️ Статус бота успішно змінено!\n\n"
+                    f"Тепер бот {status_text}. "
+                    f"{'\n\nБот буде автоматично перевіряти відвідуваність.' if new_status else '\n\nБот не буде перевіряти відвідуваність поки ви не активуєте його.'}"
+                )
+            else:
+                await callback.message.answer(
+                    "❌ Помилка при зміні статусу бота. Будь ласка, спробуйте пізніше."
+                )
+        finally:
+            session.close()
 
 
 async def process_username(message: Message, state: FSMContext):
@@ -132,10 +236,24 @@ async def process_password(message: Message, state: FSMContext):
         user = DatabaseManager.set_user_credentials(session, user_id, username, password)
         
         if user:
+            # Create group selection keyboard
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="ІТШІ")],
+                    [KeyboardButton(text="КНТ")],
+                    [KeyboardButton(text="ІТУ")],
+                ],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+            
             await message.answer(
                 "✅ Ваші облікові дані Moodle успішно збережено!\n\n"
-                "Тепер ви можете додати заняття, натиснувши '➕ Додати заняття'"
+                "Будь ласка, оберіть вашу групу:",
+                reply_markup=keyboard
             )
+            await state.set_state(GroupForm.group)
+            return
         else:
             await message.answer(
                 "❌ Не вдалося зберегти ваші облікові дані. Будь ласка, спробуйте пізніше."
@@ -143,7 +261,7 @@ async def process_password(message: Message, state: FSMContext):
     finally:
         session.close()
     
-    # Finish the state
+    # Finish the state if something went wrong
     await state.clear()
 
 
@@ -168,6 +286,52 @@ async def add_lesson_command(message: Message, state: FSMContext):
         await state.set_state(LessonForm.url)
     finally:
         session.close()
+
+
+async def process_group(message: Message, state: FSMContext):
+    """Process group selection"""
+    group = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Validate group
+    valid_groups = ["ІТШІ", "КНТ", "ІТУ"]
+    if group not in valid_groups:
+        await message.answer(
+            "❌ Будь ласка, оберіть групу зі списку, використовуючи кнопки."
+        )
+        return
+    
+    session = get_db_session()
+    try:
+        # Save group
+        success = DatabaseManager.set_user_group(session, user_id, group)
+        
+        if success:
+            # Create keyboard with main commands
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="🔑 Налаштувати облікові дані")],
+                    [KeyboardButton(text="➕ Додати заняття"), KeyboardButton(text="❌ Видалити заняття")],
+                    [KeyboardButton(text="📋 Список занять"), KeyboardButton(text="⚙️ Увімкнути/вимкнути заняття")],
+                    [KeyboardButton(text="📊 Статус")]
+                ],
+                resize_keyboard=True
+            )
+            
+            await message.answer(
+                f"✅ Ваша група успішно збережена: {group}\n\n"
+                f"Тепер ви можете додати заняття, натиснувши '➕ Додати заняття'",
+                reply_markup=keyboard
+            )
+        else:
+            await message.answer(
+                "❌ Не вдалося зберегти групу. Будь ласка, спробуйте пізніше."
+            )
+    finally:
+        session.close()
+    
+    # Finish the state
+    await state.clear()
 
 
 async def process_lesson_url(message: Message, state: FSMContext):
@@ -614,15 +778,25 @@ async def status_command(message: Message):
             return
         
         # Check if user has Moodle credentials
-        is_logged_in = bool(user.moodle_username and user.encrypted_password)
+        if not user.moodle_username or not user.encrypted_password:
+            await message.answer(
+                "❌ Ви ще не налаштували свої облікові дані Moodle.\n"
+                "Використайте '🔑 Налаштувати облікові дані' для налаштування."
+            )
+            return
+            
+        # Get all lessons for the user
+        lessons = DatabaseManager.get_user_lessons(session, user_id)
         
-        # Get active lessons
-        lessons = DatabaseManager.get_user_lessons(session, user_id, active_only=True)
-        
-        # Format status message
-        status_text = "📊 Ваш поточний статус:\n\n"
+        # Prepare status message
+        status_text = f"<b>📊 Статус облікового запису:</b>\n\n"
+        status_text += f"🔑 Логін: {user.moodle_username}\n"
+        status_text += f"👥 Група: {user.group or 'Не вибрана'}\n"
+        status_text += f"🔄 Статус бота: {'Активний' if user.active else 'Неактивний'}\n\n"
         
         # Login status
+        is_logged_in = bool(user.moodle_username and user.encrypted_password)
+        
         if is_logged_in:
             status_text += f"✅ {hbold('Статус авторизації:')} Ви авторизовані в системі dl.nure.ua як {hitalic(user.moodle_username)}\n\n"
         else:
@@ -671,8 +845,8 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(schedule_command, Command(commands=["schedule"]))
     
     # Register schedule button handlers
-    dp.message.register(today_schedule_command, F.text == "📆 Розклад на сьогодні")
-    dp.message.register(week_schedule_command, F.text == "📅 Розклад на тиждень")
+    dp.message.register(today_schedule_command, F.text == "📆 Сьогодні")
+    dp.message.register(week_schedule_command, F.text == "📅 Тиждень")
     dp.message.register(current_class_command, F.text == "🔍 Поточне заняття")
     dp.message.register(full_schedule_command, F.text == "📋 Повний розклад")
     
@@ -682,6 +856,7 @@ def register_handlers(dp: Dispatcher):
     # Form state handlers
     dp.message.register(process_username, CredentialsForm.username)
     dp.message.register(process_password, CredentialsForm.password)
+    dp.message.register(process_group, GroupForm.group)
     dp.message.register(process_lesson_url, LessonForm.url)
     dp.message.register(process_lesson_name, LessonForm.name)
     
@@ -689,5 +864,6 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(remove_lesson_callback, F.data.startswith("remove_"))
     dp.callback_query.register(toggle_lesson_callback, F.data.startswith("toggle_"))
     dp.callback_query.register(handle_schedule_callback, F.data.startswith("schedule:"))
+    dp.callback_query.register(handle_settings_callback, F.data.startswith("settings:"))
     
     return dp

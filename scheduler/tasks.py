@@ -35,11 +35,11 @@ class AttendanceScheduler:
     
     def start(self):
         """Start the scheduler"""
-        # Check all attendance links every 5 minutes
+        # Check all attendance links on configured interval
         self.scheduler.add_job(
             self._run_check_attendance, 
             'interval', 
-            minutes=5,
+            minutes=CHECK_INTERVAL_MINUTES,
             next_run_time=datetime.datetime.now(pytz.UTC) + datetime.timedelta(seconds=10)  # Start first check after 10 seconds
         )
         
@@ -48,7 +48,7 @@ class AttendanceScheduler:
         # Load the schedule data
         self.schedule_parser.load_schedule()
         
-        logger.info(f"Scheduler started. Checking all attendance links every 5 minutes")
+        logger.info(f"Scheduler started. Checking all attendance links every 30 minutes")
         
     def reload_schedule(self):
         """Reload the schedule from CSV file"""
@@ -128,8 +128,56 @@ class AttendanceScheduler:
         except Exception as e:
             logger.error(f"Error in attendance check: {str(e)}")
     
+    def is_within_working_hours(self):
+        """Check if current time is within working hours (7:45-18:15 Kyiv time)"""
+        try:
+            kyiv_tz = pytz.timezone('Europe/Kiev')
+            now = datetime.datetime.now(kyiv_tz)
+            
+            # Skip weekends (Saturday=5, Sunday=6)
+            if now.weekday() >= 5:
+                logger.info("Skipping attendance check - it's weekend")
+                return False
+                
+            # Define working hours (7:45 - 18:15)
+            start_time = now.replace(hour=7, minute=45, second=0, microsecond=0)
+            end_time = now.replace(hour=18, minute=15, second=0, microsecond=0)
+            
+            # Check if current time is within working hours
+            is_within_hours = start_time <= now <= end_time
+            
+            if not is_within_hours:
+                logger.info(f"Outside of working hours (7:45-18:15 Kyiv time). Current time: {now.strftime('%H:%M')}")
+                
+            return is_within_hours
+            
+        except Exception as e:
+            logger.error(f"Error checking working hours: {str(e)}")
+            return True  # Default to True in case of error to not block attendance checks
+    
     async def check_all_attendances(self):
         """Check attendance for all active users and lessons"""
+        # Skip if outside working hours (7:45-18:15 Kyiv time)
+        if not self.is_within_working_hours():
+            return
+            
+        # Check if there are any classes scheduled for today
+        try:
+            kyiv_tz = pytz.timezone('Europe/Kiev')
+            now = datetime.datetime.now(kyiv_tz)
+            
+            # Get today's schedule - for now we're using ІТШІ timetable as default
+            today_schedule = self.schedule_parser.get_schedule_for_date(now)
+            
+            # If no classes today, skip the check
+            if not today_schedule or len(today_schedule) == 0:
+                logger.info("No classes scheduled for today, skipping attendance check")
+                return
+                
+        except Exception as e:
+            logger.error(f"Error checking today's schedule: {str(e)}")
+            # Continue with attendance check if there was an error checking the schedule
+            
         logger.info("Starting attendance check for all users")
         
         session = get_db_session()
@@ -144,9 +192,22 @@ class AttendanceScheduler:
                     # Skip if user has no credentials or is inactive
                     if not user.moodle_username or not user.encrypted_password or not user.active:
                         continue
+                    
+                    # Skip if user has no group set (temporarily allow users without group)
+                    if not user.group:
+                        logger.info(f"User {user.telegram_id} has no group set, using default ІТШІ group")
+                        # For now, assume ІТШІ for users without a group
+                        effective_group = "ІТШІ"
+                    else:
+                        effective_group = user.group
                         
+                    # For now, we only have ІТШІ schedule, so check if user is in that group
+                    # In future, this can be extended to other groups
+                    if effective_group != "ІТШІ":
+                        logger.info(f"User {user.telegram_id} is in group {effective_group}, but we only have schedule for ІТШІ. Using ІТШІ schedule.")
+                    
                     # Get all lessons for this user, regardless of status
-                    all_lessons = DatabaseManager.get_user_lessons(session, user.id)
+                    all_lessons = DatabaseManager.get_user_lessons(session, user.telegram_id)
                     
                     # Check attendance for all lessons
                     await self.check_user_attendances(user, all_lessons)
@@ -169,8 +230,8 @@ class AttendanceScheduler:
                 logger.info(f"No lessons found for user {user.telegram_id}")
                 return
             
-            # Get Moodle client for this user
-            client = MoodleClient(user.moodle_username, user.moodle_password)
+            # Get Moodle client for this user (password is stored encrypted)
+            client = MoodleClient(user.moodle_username, user.encrypted_password, is_encrypted=True)
             
             # Process all lessons without filtering by current class or subject
             for lesson in lessons:
@@ -223,7 +284,7 @@ class AttendanceScheduler:
                         try:
                             asyncio.create_task(self.send_notification(
                                 user.telegram_id,
-                                f"✅ Успішно відмічено присутність на {lesson_name}!"
+                                f"✅ Успішно відмічено присутність на предметі: {lesson_name}!"
                             ))
                         except Exception as e:
                             logger.error(f"Error sending success notification: {str(e)}")
@@ -235,7 +296,7 @@ class AttendanceScheduler:
                         try:
                             asyncio.create_task(self.send_notification(
                                 user.telegram_id,
-                                f"❌ Не вдалося відмітитись на {lesson_name}: {result['message']}"
+                                f"❌ Не вдалося відмітитись на предметі {lesson_name}: {result['message']}"
                             ))
                         except Exception as e:
                             logger.error(f"Error sending error notification: {str(e)}")

@@ -32,6 +32,32 @@ class DatabaseManager:
         session.commit()
         session.refresh(user)
         return user
+        
+    @staticmethod
+    def set_user_group(session: Session, telegram_id: int, group: str) -> bool:
+        """Set or update user's group"""
+        user = DatabaseManager.get_user_by_telegram_id(session, telegram_id)
+        if not user:
+            return False
+            
+        user.group = group
+        session.commit()
+        return True
+        
+    @staticmethod
+    def toggle_user_active_status(session: Session, telegram_id: int) -> tuple[bool, bool]:
+        """Toggle user active status
+        
+        Returns:
+            tuple[bool, bool]: (success, new_status)
+        """
+        user = DatabaseManager.get_user_by_telegram_id(session, telegram_id)
+        if not user:
+            return False, False
+            
+        user.active = not user.active
+        session.commit()
+        return True, user.active
 
     @staticmethod
     def add_lesson(session: Session, telegram_id: int, url: str, name: str = None) -> Lesson:

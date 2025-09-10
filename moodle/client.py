@@ -391,104 +391,73 @@ class MoodleClient:
             logged_in = self.login()
             if not logged_in:
                 return {'status': 'error', 'message': 'Not logged in'}
-        
+
         try:
-            # Get the form page
+            # Load the form page
             logger.info(f"Getting attendance form: {form_url}")
             response = self.session.get(form_url)
             if response.status_code != 200:
                 return {'status': 'error', 'message': f'Failed to load form: {response.status_code}'}
-            
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Try to find any form on the page
-            form = soup.find('form', {'id': 'studentsform'}) or soup.find('form', {'id': 'attendanceform'}) or soup.find('form')
-            
+            form = soup.find('form')
             if not form:
-                # This might be a direct link with sessid and sesskey in the URL
-                if 'sessid=' in form_url and 'sesskey=' in form_url:
-                    logger.info("Direct attendance link detected, considering it as successful")
-                    # Simply accessing the URL should mark attendance in this case
-                    return {'status': 'success', 'message': 'Direct attendance link accessed'}
-                else:
-                    logger.error("No attendance form found on the page")
-                    return {'status': 'error', 'message': 'Attendance form not found'}
-            
-            # Extract form data
-            form_data = {}
-            for input_tag in form.find_all('input'):
-                name = input_tag.get('name')
-                value = input_tag.get('value')
-                if name and value:
-                    form_data[name] = value
-            
-            # Check if this is already a submit confirmation page
-            confirmation_texts = ['confirm', 'подтвердить', 'підтвердити', 'отметиться', 'відмітитися']
-            page_text = soup.get_text().lower()
-            if any(text in page_text for text in confirmation_texts):
-                submit_button = soup.find('input', {'type': 'submit'}) or soup.find('button', {'type': 'submit'})
-                if submit_button:
-                    button_name = submit_button.get('name')
-                    button_value = submit_button.get('value', '1')
-                    if button_name:
-                        form_data[button_name] = button_value
-            
-            # Try to find the "Present" or similar option
-            present_input = soup.find('input', {'name': re.compile(r'status'), 'value': '1'}) or \
-                           soup.find('input', {'type': 'radio', 'value': re.compile(r'1|present', re.I)})
-            
-            if present_input:
-                name = present_input.get('name')
-                if name:
-                    form_data[name] = present_input.get('value', '1')
-                    logger.info(f"Found present option: {name}={form_data[name]}")
-            
-            # Get form action URL
-            form_action = form.get('action')
-            if not form_action:
-                form_action = form_url
-            elif not form_action.startswith('http'):
-                # Relative URL, make absolute
-                if form_action.startswith('/'):
-                    form_action = f"{MOODLE_BASE_URL}{form_action}"
-                else:
-                    form_action = f"{MOODLE_BASE_URL}/{form_action}"
-            
-            logger.info(f"Submitting attendance form to: {form_action}")
-            logger.info(f"Form data: {form_data}")
-            
-            # Submit the form
-            response = self.session.post(form_action, data=form_data)
-            if response.status_code == 200:
-                # Check for success message
-                soup = BeautifulSoup(response.text, 'html.parser')
-                success_msgs = ['attendance submitted', 'successfully recorded', 'успешно отмечен', 'успішно відмічено', 'отмечено', 'відмічено']
-                page_text = soup.get_text().lower()
-                
-                for msg in success_msgs:
-                    if msg in page_text:
-                        logger.info(f"Success message found: {msg}")
-                        return {'status': 'success', 'message': 'Attendance marked successfully'}
-                
-                # If we reached here, no explicit success message was found
-                # Check if there are any error messages
-                error_msgs = ['error', 'failed', 'ошибка', 'помилка']
-                for msg in error_msgs:
-                    if msg in page_text:
-                        logger.error(f"Error message found: {msg}")
-                        return {'status': 'error', 'message': 'Form submission error detected'}
-                
-                # If no error message either, assume success if we got a 200 response
-                logger.info("No explicit success or error message found, assuming success based on status code")
-                return {'status': 'success', 'message': 'Attendance likely marked (no explicit confirmation)'}
-            else:
-                logger.error(f"Form submission failed with status code: {response.status_code}")
-                return {'status': 'error', 'message': f'Form submission failed: {response.status_code}'}
-        
+                return {'status': 'error', 'message': 'Attendance form not found'}
+
+            # Build payload from inputs
+            payload = {}
+            radios = []
+            for inp in form.find_all('input'):
+                name = inp.get('name')
+                if not name:
+                    continue
+                itype = (inp.get('type') or '').lower()
+                if itype in ['radio', 'checkbox']:
+                    if itype == 'radio':
+                        radios.append(inp)
+                    continue
+                payload[name] = inp.get('value', '')
+
+            # Try to pick "Present"-like status
+            chosen = False
+            for r in radios:
+                label_text = ''
+                label = r.find_parent('label')
+                if label:
+                    label_text = label.get_text(strip=True).lower()
+                if any(k in label_text for k in ['present', 'присутств', 'присутн', 'відвідав', 'відвідування']):
+                    payload[r.get('name')] = r.get('value')
+                    chosen = True
+                    break
+            if not chosen and radios:
+                payload[radios[0].get('name')] = radios[0].get('value')
+
+            # Determine action
+            action = form.get('action') or form_url
+            if action.startswith('/'):
+                action = f"{MOODLE_BASE_URL}{action}"
+
+            post = self.session.post(action, data=payload)
+            if post.status_code != 200:
+                return {'status': 'error', 'message': f'Failed to submit form: {post.status_code}'}
+
+            body = post.text.lower()
+            success_markers = ['attendance has been recorded', 'успешно', 'успішно', 'відмічено', 'attendance: status set']
+            if any(m in body for m in success_markers):
+                return {'status': 'success'}
+            return {'status': 'unknown', 'message': 'Submission response unclear'}
         except Exception as e:
             logger.error(f"Error submitting attendance: {str(e)}")
             return {'status': 'error', 'message': str(e)}
-    
-    def mark_attendance(self, form_url):
-        """Legacy method for marking attendance, calls submit_attendance"""
-        return self.submit_attendance(form_url)
+
+    def mark_attendance(self, lesson_url):
+        """Check availability and submit attendance when possible"""
+        try:
+            check = self.check_attendance(lesson_url)
+            if check.get('status') != 'available':
+                return {'status': 'not_available', 'message': check.get('message', 'Not available')}
+            form_url = check.get('form_url') or check.get('form_action') or lesson_url
+            return self.submit_attendance(form_url)
+        except Exception as e:
+            logger.error(f"Error in mark_attendance: {str(e)}")
+            return {'status': 'error', 'message': str(e)}

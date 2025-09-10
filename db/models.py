@@ -18,6 +18,7 @@ class User(Base):
     telegram_id = Column(Integer, unique=True, nullable=False)
     moodle_username = Column(String, nullable=True)
     encrypted_password = Column(String, nullable=True)
+    group = Column(String, nullable=True)  # Group name (e.g., 'ІТШІ', 'КНТ', 'ІТУ')
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
@@ -59,8 +60,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db_session():
     """Get database session."""
-    session = SessionLocal()
-    try:
-        return session
-    finally:
-        session.close()
+    # IMPORTANT: Do NOT close the session here. The caller is responsible for
+    # closing it (most call sites already use try/finally to close).
+    # Returning a session that is immediately closed breaks all DB operations.
+    return SessionLocal()

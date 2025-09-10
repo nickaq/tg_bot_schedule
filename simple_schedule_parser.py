@@ -292,3 +292,22 @@ class SimpleScheduleParser:
                     result.append(f"  ┗ 🕒 {start_time} - {end_time}: {subject}")
         
         return "\n".join(result)
+
+    def get_schedule_for_date(self, current_dt):
+        """Return the list of sessions for the given date.
+        If current_dt is None, use now in Kyiv tz.
+        """
+        if not self.is_loaded:
+            if not self.load_schedule():
+                logger.error("Failed to load schedule")
+                return []
+
+        if current_dt is None:
+            current_dt = datetime.now(self.kiev_tz)
+
+        # Normalize to Kyiv date
+        if current_dt.tzinfo is not None:
+            current_dt = current_dt.astimezone(self.kiev_tz)
+        day = current_dt.date()
+
+        return [s for s in self.schedule if s['date'] == day]
