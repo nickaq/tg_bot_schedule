@@ -2,6 +2,7 @@ import logging
 import asyncio
 import sys
 import os
+import threading
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
@@ -9,6 +10,7 @@ from aiogram.types import BotCommand, BotCommandScopeDefault
 from telegram.handlers import register_handlers
 from scheduler.tasks import AttendanceScheduler
 from config import TELEGRAM_TOKEN, ENCRYPTION_KEY
+from health_server import start_health_server
 
 # Configure logging
 logging.basicConfig(
@@ -57,6 +59,13 @@ async def on_shutdown(bot, dispatcher):
 
 async def main():
     """Main function to start the bot"""
+    # Start health server for Azure health checks on port 8000 ASAP
+    try:
+        threading.Thread(target=start_health_server, daemon=True).start()
+        logger.info("Health server started on port %s", os.getenv("PORT") or os.getenv("WEBSITES_PORT") or 8000)
+    except Exception as e:
+        logger.error(f"Failed to start health server: {e}")
+    
     # Check if environment variables are set
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN is not set in the environment variables or .env file")
